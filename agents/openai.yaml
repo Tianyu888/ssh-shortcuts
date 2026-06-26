@@ -1,0 +1,4 @@
+interface:
+  display_name: "SSH Shortcuts"
+  short_description: "Manage private SSH shortcut catalogs safely."
+  default_prompt: "Use $ssh-shortcuts to create or update my SSH shortcuts from my local config, then show me how to connect safely."
