@@ -14,6 +14,7 @@ The skill stores real host data in a private local config file:
 
 - Manage SSH aliases from a private local JSON catalog.
 - Generate a managed block for `~/.ssh/config`.
+- Configure passwordless SSH after a first password login.
 - Support jump hosts through `ProxyJump`.
 - Search hosts by shortcut name, description, or service.
 - Keep public skill files free of private IPs, passwords, host inventories, and service secrets.
@@ -53,7 +54,7 @@ python3 ~/.codex/skills/ssh-shortcuts/scripts/ssh_shortcuts.py add prod-api \
   --host 203.0.113.10 \
   --user ubuntu \
   --port 22 \
-  --identity-file ~/.ssh/prod_api \
+  --identity-file '~/.ssh/prod_api' \
   --description "Production API server" \
   --service api \
   --service nginx \
@@ -82,6 +83,52 @@ Test a shortcut:
 
 ```bash
 python3 ~/.codex/skills/ssh-shortcuts/scripts/ssh_shortcuts.py test prod-api
+```
+
+## First Login: Password to SSH Alias
+
+When you only have a server account and password, use the password once to install your public key, then save an alias for future logins.
+
+Interactive mode:
+
+```bash
+python3 ~/.codex/skills/ssh-shortcuts/scripts/ssh_shortcuts.py setup-key \
+  --host 203.0.113.10 \
+  --user ubuntu \
+  --port 22 \
+  --identity-file '~/.ssh/id_ed25519' \
+  --generate-key
+```
+
+If the command succeeds, ask whether this server should get an alias. If yes, save the alias and update `~/.ssh/config`:
+
+```bash
+python3 ~/.codex/skills/ssh-shortcuts/scripts/ssh_shortcuts.py setup-key \
+  --host 203.0.113.10 \
+  --user ubuntu \
+  --port 22 \
+  --identity-file '~/.ssh/id_ed25519' \
+  --alias prod-api \
+  --description "Production API server" \
+  --install-ssh-config \
+  --force
+```
+
+After that, connect with:
+
+```bash
+ssh prod-api
+```
+
+For non-interactive agent runs, you can provide the first-login password through an environment variable. This requires `sshpass`; do not put the password directly in a command argument:
+
+```bash
+export SSH_SHORTCUTS_PASSWORD='temporary-password'
+python3 ~/.codex/skills/ssh-shortcuts/scripts/ssh_shortcuts.py setup-key \
+  --host 203.0.113.10 \
+  --user ubuntu \
+  --generate-key
+unset SSH_SHORTCUTS_PASSWORD
 ```
 
 ## Config Example
@@ -132,6 +179,7 @@ SSH Shortcuts 是一个公开的 Codex skill，用来安全地管理用户自己
 
 - 用本地私有 JSON 配置管理 SSH alias。
 - 为 `~/.ssh/config` 生成受控配置块。
+- 首次密码登录后自动配置 SSH 免密登录。
 - 通过 `ProxyJump` 支持跳板机。
 - 按 shortcut 名称、描述或服务名查找服务器。
 - 避免在公开 skill 文件里保存私有 IP、密码、主机清单或服务密钥。
@@ -171,7 +219,7 @@ python3 ~/.codex/skills/ssh-shortcuts/scripts/ssh_shortcuts.py add prod-api \
   --host 203.0.113.10 \
   --user ubuntu \
   --port 22 \
-  --identity-file ~/.ssh/prod_api \
+  --identity-file '~/.ssh/prod_api' \
   --description "Production API server" \
   --service api \
   --service nginx \
@@ -200,6 +248,52 @@ python3 ~/.codex/skills/ssh-shortcuts/scripts/ssh_shortcuts.py install-ssh-confi
 
 ```bash
 python3 ~/.codex/skills/ssh-shortcuts/scripts/ssh_shortcuts.py test prod-api
+```
+
+## 首次登录：从密码到 SSH 别名
+
+如果你一开始只有服务器账号和密码，可以先用密码登录一次，把本机公钥安装到服务器，然后保存别名供以后免密登录。
+
+交互模式：
+
+```bash
+python3 ~/.codex/skills/ssh-shortcuts/scripts/ssh_shortcuts.py setup-key \
+  --host 203.0.113.10 \
+  --user ubuntu \
+  --port 22 \
+  --identity-file '~/.ssh/id_ed25519' \
+  --generate-key
+```
+
+如果命令成功，agent 应该询问用户是否要给这个服务器设置别名。如果用户同意，就保存别名并更新 `~/.ssh/config`：
+
+```bash
+python3 ~/.codex/skills/ssh-shortcuts/scripts/ssh_shortcuts.py setup-key \
+  --host 203.0.113.10 \
+  --user ubuntu \
+  --port 22 \
+  --identity-file '~/.ssh/id_ed25519' \
+  --alias prod-api \
+  --description "Production API server" \
+  --install-ssh-config \
+  --force
+```
+
+之后就可以通过别名登录：
+
+```bash
+ssh prod-api
+```
+
+如果 agent 运行环境不能交互输入密码，可以临时通过环境变量传入首次登录密码。这个方式需要安装 `sshpass`；不要把密码直接写在命令参数里：
+
+```bash
+export SSH_SHORTCUTS_PASSWORD='temporary-password'
+python3 ~/.codex/skills/ssh-shortcuts/scripts/ssh_shortcuts.py setup-key \
+  --host 203.0.113.10 \
+  --user ubuntu \
+  --generate-key
+unset SSH_SHORTCUTS_PASSWORD
 ```
 
 ## 配置示例

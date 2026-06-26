@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -19,6 +20,7 @@ BEGIN = "# BEGIN ssh-shortcuts managed"
 END = "# END ssh-shortcuts managed"
 DEFAULT_CONFIG = Path("~/.config/ssh-shortcuts/shortcuts.json").expanduser()
 DEFAULT_SSH_CONFIG = Path("~/.ssh/config").expanduser()
+DEFAULT_IDENTITY = "~/.ssh/id_ed25519"
 VALID_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -66,6 +68,23 @@ def normalize_shortcut(raw: dict[str, Any]) -> dict[str, Any]:
 
 def quote_command(parts: list[str]) -> str:
     return " ".join(shlex.quote(str(part)) for part in parts if part not in ("", None))
+
+
+def target_for(host: str, user: str | None) -> str:
+    return f"{user}@{host}" if user else host
+
+
+def direct_ssh_base(args: argparse.Namespace, *, batch: bool = False) -> list[str]:
+    cmd = ["ssh"]
+    if batch:
+        cmd.extend(["-o", "BatchMode=yes"])
+    if getattr(args, "proxy_jump", None):
+        cmd.extend(["-J", args.proxy_jump])
+    if getattr(args, "identity_file", None):
+        cmd.extend(["-i", args.identity_file])
+    if getattr(args, "port", None):
+        cmd.extend(["-p", str(args.port)])
+    return cmd
 
 
 def ssh_command(name: str, shortcut: dict[str, Any]) -> str:
@@ -177,7 +196,7 @@ def parse_key_value(values: list[str]) -> dict[str, str]:
     return result
 
 
-def cmd_add(args: argparse.Namespace) -> None:
+def upsert_shortcut(args: argparse.Namespace) -> None:
     require_name(args.name)
     path = config_path()
     catalog = load_catalog(path)
@@ -204,6 +223,10 @@ def cmd_add(args: argparse.Namespace) -> None:
         item["ssh_options"] = options
     catalog["shortcuts"][args.name] = item
     save_catalog(path, catalog)
+
+
+def cmd_add(args: argparse.Namespace) -> None:
+    upsert_shortcut(args)
     print(f"Saved shortcut: {args.name}")
 
 
@@ -245,6 +268,104 @@ def cmd_test(args: argparse.Namespace) -> None:
     command = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={args.timeout}", args.name, args.remote_command]
     print(quote_command(command))
     raise SystemExit(subprocess.call(command))
+
+
+def ensure_key(identity_file: Path, comment: str, generate: bool) -> Path:
+    public_file = Path(f"{identity_file}.pub")
+    if identity_file.exists() and public_file.exists():
+        return public_file
+    if not identity_file.exists():
+        if not generate:
+            raise SystemExit(f"Missing identity file: {identity_file}. Pass --generate-key to create one.")
+        identity_file.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.check_call([
+            "ssh-keygen",
+            "-t",
+            "ed25519",
+            "-f",
+            str(identity_file),
+            "-C",
+            comment,
+            "-N",
+            "",
+        ])
+        identity_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        return public_file
+    if not public_file.exists():
+        public = subprocess.check_output(["ssh-keygen", "-y", "-f", str(identity_file)], text=True)
+        public_file.write_text(public, encoding="utf-8")
+        public_file.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+    return public_file
+
+
+def run_initial_ssh(args: argparse.Namespace, remote_command: str) -> int:
+    command = direct_ssh_base(args)
+    command.extend([
+        "-o",
+        "PreferredAuthentications=publickey,password,keyboard-interactive",
+        target_for(args.host, args.user),
+        remote_command,
+    ])
+    env = os.environ.copy()
+    secret = env.get("SSH_SHORTCUTS_PASSWORD") or env.get("SSHPASS")
+    used_sshpass = False
+    if secret:
+        sshpass = shutil.which("sshpass")
+        if not sshpass:
+            raise SystemExit("SSH_SHORTCUTS_PASSWORD/SSHPASS is set, but sshpass is not installed")
+        env["SSHPASS"] = secret
+        command = [sshpass, "-e"] + command
+        used_sshpass = True
+    print(quote_command(command[2:] if used_sshpass else command))
+    return subprocess.call(command, env=env)
+
+
+def test_direct_key_login(args: argparse.Namespace) -> int:
+    command = direct_ssh_base(args, batch=True)
+    command.extend([target_for(args.host, args.user), "true"])
+    print(quote_command(command))
+    return subprocess.call(command)
+
+
+def cmd_setup_key(args: argparse.Namespace) -> None:
+    original_identity = args.identity_file
+    identity = Path(original_identity).expanduser()
+    args.identity_file = str(identity)
+    comment = args.key_comment or f"ssh-shortcuts:{args.user or 'user'}@{args.host}"
+    public_file = ensure_key(identity, comment, args.generate_key)
+    public_key = public_file.read_text(encoding="utf-8").strip()
+    remote_command = (
+        "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; "
+        f"grep -qxF {shlex.quote(public_key)} ~/.ssh/authorized_keys || "
+        f"printf '%s\\n' {shlex.quote(public_key)} >> ~/.ssh/authorized_keys"
+    )
+    if run_initial_ssh(args, remote_command) != 0:
+        raise SystemExit("Failed to install the public key on the remote host")
+    if test_direct_key_login(args) != 0:
+        raise SystemExit("Public key was installed, but BatchMode key login did not succeed")
+
+    print("Passwordless SSH login is configured.")
+    if args.alias:
+        add_args = argparse.Namespace(
+            name=args.alias,
+            host=args.host,
+            user=args.user,
+            port=args.port,
+            identity_file=original_identity if original_identity.startswith("~") else str(identity),
+            proxy_jump=args.proxy_jump,
+            description=args.description,
+            service=args.service,
+            path=args.path,
+            option=args.option,
+            force=args.force,
+        )
+        upsert_shortcut(add_args)
+        print(f"Saved shortcut alias: {args.alias}")
+        if args.install_ssh_config:
+            cmd_install(argparse.Namespace(ssh_config=str(DEFAULT_SSH_CONFIG)))
+        print(f"Connect with: ssh {args.alias}")
+    else:
+        print("No alias was saved. Ask the user whether to create one, then run the add command if requested.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -295,6 +416,23 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument("--timeout", type=int, default=5)
     test.add_argument("--remote-command", default="true")
     test.set_defaults(func=cmd_test)
+
+    setup = sub.add_parser("setup-key", help="Install an SSH public key after first password login")
+    setup.add_argument("--host", required=True)
+    setup.add_argument("--user")
+    setup.add_argument("--port", type=int)
+    setup.add_argument("--identity-file", default=str(DEFAULT_IDENTITY))
+    setup.add_argument("--proxy-jump")
+    setup.add_argument("--generate-key", action="store_true", help="Create the identity file if it does not exist")
+    setup.add_argument("--key-comment")
+    setup.add_argument("--alias", help="Save this host as a shortcut alias after key login succeeds")
+    setup.add_argument("--description")
+    setup.add_argument("--service", action="append")
+    setup.add_argument("--path", action="append", metavar="KEY=VALUE")
+    setup.add_argument("--option", action="append", metavar="KEY=VALUE")
+    setup.add_argument("--force", action="store_true")
+    setup.add_argument("--install-ssh-config", action="store_true", help="Update ~/.ssh/config after saving --alias")
+    setup.set_defaults(func=cmd_setup_key)
 
     return parser
 
